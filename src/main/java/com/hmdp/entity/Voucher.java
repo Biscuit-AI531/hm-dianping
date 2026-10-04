@@ -90,6 +90,10 @@ public class Voucher implements Serializable {
     @TableField(exist = false)
     private LocalDateTime endTime;
 
+    /** 是否可下单，由点评服务按自身时钟计算；仅用于响应，不入库。 */
+    @TableField(exist = false)
+    private Boolean orderable;
+
     /**
      * 创建时间
      */

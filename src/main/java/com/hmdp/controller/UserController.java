@@ -10,6 +10,8 @@ import com.hmdp.entity.UserInfo;
 import com.hmdp.service.IUserInfoService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.UserHolder;
+import com.hmdp.utils.RedisConstants;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
@@ -27,6 +29,9 @@ import javax.servlet.http.HttpSession;
 @RestController
 @RequestMapping("/user")
 public class UserController {
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
 
     @Resource
     private IUserService userService;
@@ -58,9 +63,13 @@ public class UserController {
      * @return 无
      */
     @PostMapping("/logout")
-    public Result logout(){
-        // TODO 实现登出功能
-        return Result.fail("功能未完成");
+    public Result logout(@RequestHeader(value = "authorization", required = false) String token){
+        if (token == null || token.trim().isEmpty()) {
+            return Result.fail("缺少登录令牌");
+        }
+        stringRedisTemplate.delete(RedisConstants.LOGIN_USER_KEY + token);
+        UserHolder.removeUser();
+        return Result.ok();
     }
 
     @GetMapping("/me")

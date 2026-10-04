@@ -1,6 +1,6 @@
 # 黑马点评 Java 服务
 
-基于 Spring Boot 的本地生活业务服务，提供店铺、探店笔记、优惠券、用户、关注与秒杀订单等能力。当前仓库中的 [CityLens](../../CityLens/README.md) 通过只读 HTTP 接口使用店铺、商圈、笔记和优惠券数据。
+基于 Spring Boot 的本地生活业务服务，提供店铺、探店笔记、优惠券、用户、关注与优惠券订单等能力。当前仓库中的 [CityLens](../../CityLens/README.md) 使用只读接口查询店铺、商圈、笔记和优惠券，并在用户确认后调用订单接口。
 
 ## 技术栈与目录
 
@@ -29,7 +29,7 @@ docker compose -f CityLens/dev/docker-compose.yml logs -f java
 | MySQL | `127.0.0.1:3306` |
 | Redis | `127.0.0.1:6380` |
 
-Compose 使用独立的 MySQL、Redis 卷，首次创建 MySQL 卷时导入 `hmdp.sql`，随后导入 `CityLens/dev/02-citylens-evidence.sql`。第二份脚本修正原始笔记与店铺的错配，并加入明确标注为**合成演示数据**的笔记；这些笔记不代表真实用户评价。已有数据库卷不会重新执行初始化脚本，需要同步演示笔记时运行：
+Compose 使用独立的 MySQL、Redis 卷，首次创建 MySQL 卷时导入 `hmdp.sql`，随后导入 `CityLens/dev/02-citylens-evidence.sql`。第二份脚本修正原始笔记与店铺的错配，并加入明确标注为**合成演示数据**的笔记、免费券及限时券；这些不代表真实用户评价或商家承诺。已有数据库卷不会重新执行初始化脚本，需要同步演示数据时运行：
 
 ```bash
 docker compose -f CityLens/dev/docker-compose.yml exec -T mysql \
@@ -71,6 +71,7 @@ Java API 默认监听 `8081`。如需同时打开点评页面，可使用上面�
 | `GET /shop/areas` | 已登记的商圈 |
 | `GET /shop/{id}` | 店铺详情 |
 | `GET /shop/search` | 组合搜索与分页 |
+| `GET /shop/batch?ids=1,2` | 批量读取当前店铺详情，供两站候选和评测复核；最多 40 个正整数 ID |
 | `GET /voucher/list/{shopId}` | 店铺当前上架券信息 |
 | `GET /blog/of/shop?shopId={id}&current=1` | 店铺最近笔记，每页 5 条 |
 | `GET /blog/search?shopId={id}&keyword={词}&current=1` | 在指定店铺的笔记标题和正文中检索，每页 5 条 |
@@ -81,10 +82,20 @@ Java API 默认监听 `8081`。如需同时打开点评页面，可使用上面�
 
 ```bash
 curl 'http://127.0.0.1:8081/shop/search?typeId=1&maxPrice=120&minScore=45&page=1&size=5'
+curl 'http://127.0.0.1:8081/shop/batch?ids=1,2'
 curl 'http://127.0.0.1:8081/blog/search?shopId=4&keyword=%E7%BA%A6%E4%BC%9A'
 ```
 
-项目还提供登录、签到、关注、发布与点赞笔记、创建优惠券和秒杀下单等接口。`POST /voucher-order/seckill/{id}` 等接口会改变业务状态并依赖登录用户；CityLens 当前**不调用任何写接口**。`/blog-comments` 尚无业务方法，`/user/logout` 当前返回“功能未完成”，不应作为已完成能力展示。
+项目还提供登录、签到、关注、发布与点赞笔记、创建优惠券等接口。与 CityLens 写操作相关的接口如下，均依赖点评登录用户：
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /voucher-order/ordinary/{id}` | 普通券一人一单；免费券直接标记为已领取，付费券仅创建待支付订单；重复提交返回已有订单号 |
+| `POST /voucher-order/seckill/{id}` | 校验秒杀时间与上架状态后进入 Redis Stream；订单异步落库，返回订单号不等于已支付 |
+| `GET /voucher-order/{id}` | 仅订单所属用户可查详情 |
+| `GET /voucher-order/of/voucher/{id}` | 查询当前用户在指定券上的订单，用于提交结果不确定时回查 |
+
+项目没有支付或退款接口。`/blog-comments` 尚无业务方法，`/user/logout` 当前返回“功能未完成”，不应作为已完成能力展示。
 
 ## 构建与验证
 

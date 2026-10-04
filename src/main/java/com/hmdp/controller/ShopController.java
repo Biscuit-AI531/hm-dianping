@@ -45,6 +45,16 @@ public class ShopController {
         return shopService.searchShops(criteria);
     }
 
+    /** CityLens 在组合两站前批量复核候选，直接读取当前店铺数据。 */
+    @GetMapping("/batch")
+    public Result queryShopsByIds(@RequestParam("ids") List<Long> ids) {
+        if (ids == null || ids.isEmpty() || ids.size() > 40 || ids.stream().anyMatch(id -> id == null || id <= 0)) {
+            return Result.fail("ids 必须包含 1~40 个正整数");
+        }
+        List<Long> uniqueIds = ids.stream().distinct().collect(Collectors.toList());
+        return Result.ok(shopService.listByIds(uniqueIds));
+    }
+
     /** 供 CityLens 在用户原话中匹配真实商圈，避免猜测地名。 */
     @GetMapping("/areas")
     public Result listAreas() {

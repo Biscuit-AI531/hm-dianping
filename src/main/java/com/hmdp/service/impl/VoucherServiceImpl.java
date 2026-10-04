@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.util.List;
+import java.time.LocalDateTime;
 
 import static com.hmdp.utils.RedisConstants.SECKILL_STOCK_KEY;
 
@@ -36,6 +37,14 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     public Result queryVoucherOfShop(Long shopId) {
         // 查询优惠券信息
         List<Voucher> vouchers = getBaseMapper().queryVoucherOfShop(shopId);
+        LocalDateTime now = LocalDateTime.now();
+        for (Voucher voucher : vouchers) {
+            boolean active = voucher.getType() != null && (voucher.getType() == 0 ||
+                    (voucher.getType() == 1 && voucher.getStock() != null && voucher.getStock() > 0
+                     && voucher.getBeginTime() != null && voucher.getEndTime() != null
+                     && !now.isBefore(voucher.getBeginTime()) && !now.isAfter(voucher.getEndTime())));
+            voucher.setOrderable(active);
+        }
         // 返回结果
         return Result.ok(vouchers);
     }

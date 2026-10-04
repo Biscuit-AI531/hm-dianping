@@ -3,9 +3,11 @@ package com.hmdp.service.impl;
 import cn.hutool.core.bean.BeanUtil;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
+import com.hmdp.entity.Voucher;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.VoucherOrderMapper;
 import com.hmdp.service.ISeckillVoucherService;
+import com.hmdp.service.IVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
@@ -23,6 +25,7 @@ import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +46,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private ISeckillVoucherService seckillVoucherService;
+
+    @Resource
+    private IVoucherService voucherService;
 
     @Resource
     private RedisIdWorker redisIdWorker;
@@ -200,6 +206,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 return;
             }
 
+            // 免费秒杀券直接标记为已领取；付费券仍须后续支付。
+            Voucher voucher = voucherService.getById(voucherId);
+            voucherOrder.setStatus(voucher != null && voucher.getPayValue() != null
+                    && voucher.getPayValue() == 0L ? 2 : 1);
             // 7.创建订单
             save(voucherOrder);
         } finally {
@@ -210,6 +220,20 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Override
     public Result seckillVoucher(Long voucherId) {
+        Voucher voucher = voucherService.getById(voucherId);
+        if (voucher == null || voucher.getStatus() == null || voucher.getStatus() != 1
+                || voucher.getType() == null || voucher.getType() != 1) {
+            return Result.fail("秒杀券不存在或已下架");
+        }
+        com.hmdp.entity.SeckillVoucher sale = seckillVoucherService.getById(voucherId);
+        LocalDateTime now = LocalDateTime.now();
+        if (sale == null || sale.getBeginTime() == null || sale.getEndTime() == null
+                || now.isBefore(sale.getBeginTime()) || now.isAfter(sale.getEndTime())) {
+            return Result.fail("秒杀券不在可购买时段");
+        }
+        // 演示 SQL 初始化的券没有经过新增券接口；仅在 Redis 缺键时补齐库存。
+        stringRedisTemplate.opsForValue().setIfAbsent("seckill:stock:" + voucherId,
+                String.valueOf(sale.getStock()));
         Long userId = UserHolder.getUser().getId();
         long orderId = redisIdWorker.nextId("order");
         // 1.执行lua脚本
@@ -218,6 +242,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 Collections.emptyList(),
                 voucherId.toString(), userId.toString(), String.valueOf(orderId)
         );
+        if (result == null) {
+            return Result.fail("订单服务暂时不可用");
+        }
         int r = result.intValue();
         // 2.判断结果是否为0
         if (r != 0) {
@@ -226,6 +253,79 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
         // 3.返回订单id
         return Result.ok(orderId);
+    }
+
+    @Override
+    public Result orderOrdinaryVoucher(Long voucherId) {
+        Long userId = UserHolder.getUser().getId();
+        RLock lock = redissonClient.getLock("lock:order:ordinary:" + userId);
+        if (!lock.tryLock()) {
+            return Result.fail("订单正在处理，请稍后查询");
+        }
+        try {
+            Voucher voucher = voucherService.getById(voucherId);
+            if (voucher == null || voucher.getStatus() == null || voucher.getStatus() != 1
+                    || voucher.getType() == null || voucher.getType() != 0) {
+                return Result.fail("普通券不存在或已下架");
+            }
+            VoucherOrder existing = query().eq("user_id", userId).eq("voucher_id", voucherId)
+                    .ne("status", 4)
+                    .orderByDesc("create_time").last("LIMIT 1").one();
+            if (existing != null) {
+                return Result.ok(existing.getId());
+            }
+            VoucherOrder order = new VoucherOrder();
+            order.setId(redisIdWorker.nextId("order"));
+            order.setUserId(userId);
+            order.setVoucherId(voucherId);
+            // 免费券直接领取；付费券只创建待支付订单，不能冒充支付成功。
+            order.setStatus(voucher.getPayValue() != null && voucher.getPayValue() == 0L ? 2 : 1);
+            if (!save(order)) {
+                return Result.fail("创建订单失败");
+            }
+            return Result.ok(order.getId());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public Result queryMyOrder(Long orderId) {
+        VoucherOrder order = getById(orderId);
+        if (order == null || !UserHolder.getUser().getId().equals(order.getUserId())) {
+            return Result.fail("订单不存在");
+        }
+        return Result.ok(order);
+    }
+
+    @Override
+    public Result queryMyVoucherOrder(Long voucherId) {
+        VoucherOrder order = query().eq("user_id", UserHolder.getUser().getId())
+                .eq("voucher_id", voucherId).orderByDesc("create_time").last("LIMIT 1").one();
+        return Result.ok(order);
+    }
+
+    @Override
+    public Result cancelUnpaidOrdinaryOrder(Long orderId) {
+        Long userId = UserHolder.getUser().getId();
+        VoucherOrder order = getById(orderId);
+        if (order == null || !userId.equals(order.getUserId())) {
+            return Result.fail("订单不存在");
+        }
+        Voucher voucher = voucherService.getById(order.getVoucherId());
+        if (voucher == null || voucher.getType() == null || voucher.getType() != 0
+                || voucher.getPayValue() == null || voucher.getPayValue() <= 0) {
+            return Result.fail("仅支持取消未支付的普通券订单");
+        }
+        if (order.getStatus() != null && order.getStatus() == 4) {
+            return Result.ok(orderId);
+        }
+        if (order.getStatus() == null || order.getStatus() != 1) {
+            return Result.fail("订单不是待支付状态");
+        }
+        boolean changed = update().set("status", 4).eq("id", orderId)
+                .eq("user_id", userId).eq("status", 1).update();
+        return changed ? Result.ok(orderId) : Result.fail("订单状态已变化，请刷新后重试");
     }
 
     /*@Override
