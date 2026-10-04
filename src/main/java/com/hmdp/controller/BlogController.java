@@ -2,6 +2,7 @@ package com.hmdp.controller;
 
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
@@ -52,6 +53,35 @@ public class BlogController {
     @GetMapping("/hot")
     public Result queryHotBlog(@RequestParam(value = "current", defaultValue = "1") Integer current) {
         return blogService.queryHotBlog(current);
+    }
+
+    /** CityLens 使用的按店铺查询探店笔记接口。 */
+    @GetMapping("/of/shop")
+    public Result queryBlogByShop(@RequestParam("shopId") Long shopId,
+                                  @RequestParam(value = "current", defaultValue = "1") Integer current) {
+        if (shopId == null || shopId <= 0 || current < 1 || current > 100000) {
+            return Result.fail("shopId 和 current 必须是正整数");
+        }
+        Page<Blog> page = blogService.query().eq("shop_id", shopId)
+                .orderByDesc("create_time").page(new Page<>(current, 5));
+        return Result.ok(page.getRecords(), page.getTotal());
+    }
+
+    /** CityLens 只读证据检索：限定店铺后按标题或正文关键词查笔记。 */
+    @GetMapping("/search")
+    public Result searchBlogEvidence(@RequestParam("shopId") Long shopId,
+                                     @RequestParam("keyword") String keyword,
+                                     @RequestParam(value = "current", defaultValue = "1") Integer current) {
+        if (shopId == null || shopId <= 0 || current == null || current < 1 || current > 100000
+                || keyword == null || keyword.trim().length() < 2 || keyword.trim().length() > 40) {
+            return Result.fail("shopId、keyword 或 current 不合法");
+        }
+        String query = keyword.trim();
+        Page<Blog> page = blogService.page(new Page<>(current, 5),
+                new QueryWrapper<Blog>().eq("shop_id", shopId)
+                        .and(w -> w.like("title", query).or().like("content", query))
+                        .orderByDesc("create_time").orderByDesc("id"));
+        return Result.ok(page.getRecords(), page.getTotal());
     }
 
     @GetMapping("/{id}")

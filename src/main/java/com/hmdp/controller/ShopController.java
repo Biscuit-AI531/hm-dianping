@@ -3,13 +3,17 @@ package com.hmdp.controller;
 
 import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.ShopSearchDTO;
 import com.hmdp.entity.Shop;
 import com.hmdp.service.IShopService;
 import com.hmdp.utils.SystemConstants;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
+import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * <p>
@@ -33,6 +37,21 @@ public class ShopController {
     @GetMapping("/{id}")
     public Result queryShopById(@PathVariable("id") Long id) {
         return shopService.queryById(id);
+    }
+
+    /** 供 CityLens 使用的只读组合搜索，评分参数按数据库的 10 倍整数传入。 */
+    @GetMapping("/search")
+    public Result searchShops(ShopSearchDTO criteria) {
+        return shopService.searchShops(criteria);
+    }
+
+    /** 供 CityLens 在用户原话中匹配真实商圈，避免猜测地名。 */
+    @GetMapping("/areas")
+    public Result listAreas() {
+        List<String> areas = shopService.list(new QueryWrapper<Shop>()
+                        .select("DISTINCT area").isNotNull("area").ne("area", ""))
+                .stream().map(Shop::getArea).sorted().collect(Collectors.toList());
+        return Result.ok(areas);
     }
 
     /**

@@ -1,9 +1,11 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.core.util.StrUtil;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.ShopSearchDTO;
 import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
@@ -130,5 +132,118 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         }
         // 6.返回
         return Result.ok(shops);
+    }
+
+    @Override
+    public Result searchShops(ShopSearchDTO criteria) {
+        if (criteria.getTypeId() == null || criteria.getTypeId() <= 0) {
+            return Result.fail("typeId 必须是正整数");
+        }
+        Integer page = criteria.getPage();
+        Integer size = criteria.getSize();
+        if (page == null || page < 1 || page > 100000 || size == null || size < 1 || size > 20) {
+            return Result.fail("page 必须为 1~100000，size 必须为 1~20");
+        }
+        if (criteria.getMaxPrice() != null && criteria.getMaxPrice() < 0) {
+            return Result.fail("maxPrice 不能为负数");
+        }
+        if (criteria.getMinScore() != null && (criteria.getMinScore() < 0 || criteria.getMinScore() > 50)) {
+            return Result.fail("minScore 必须为 0~50");
+        }
+        Double x = criteria.getX();
+        Double y = criteria.getY();
+        if ((x == null) != (y == null)) {
+            return Result.fail("x 和 y 必须一起提供");
+        }
+        if (x != null && (!Double.isFinite(x) || !Double.isFinite(y) || x < -180 || x > 180 || y < -90 || y > 90)) {
+            return Result.fail("坐标超出范围");
+        }
+        String sort = StrUtil.blankToDefault(criteria.getSort(), "score");
+        if (!"score".equals(sort) && !"price".equals(sort) && !"distance".equals(sort)) {
+            return Result.fail("sort 只支持 score、price、distance");
+        }
+        if ("distance".equals(sort) && x == null) {
+            return Result.fail("按距离排序需要 x 和 y");
+        }
+
+        QueryWrapper<Shop> query = new QueryWrapper<>();
+        query.eq("type_id", criteria.getTypeId());
+        if (StrUtil.isNotBlank(criteria.getKeyword())) {
+            query.like("name", criteria.getKeyword().trim());
+        }
+        if (StrUtil.isNotBlank(criteria.getArea())) {
+            String area = criteria.getArea().trim();
+            query.and(q -> q.like("area", area).or().like("address", area));
+        }
+        if (criteria.getMaxPrice() != null) {
+            query.le("avg_price", criteria.getMaxPrice());
+        }
+        if (criteria.getMinScore() != null) {
+            query.ge("score", criteria.getMinScore());
+        }
+        if (Boolean.TRUE.equals(criteria.getHasVoucher())) {
+            query.apply("EXISTS (SELECT 1 FROM tb_voucher v "
+                    + "LEFT JOIN tb_seckill_voucher sv ON sv.voucher_id = v.id "
+                    + "WHERE v.shop_id = tb_shop.id AND v.status = 1 "
+                    + "AND (v.type = 0 OR (v.type = 1 AND sv.stock > 0 "
+                    + "AND sv.begin_time <= NOW() AND sv.end_time >= NOW())))");
+        }
+
+        if (x == null) {
+            if ("price".equals(sort)) {
+                query.orderByAsc("avg_price").orderByDesc("score").orderByAsc("id");
+            } else {
+                query.orderByDesc("score").orderByAsc("avg_price").orderByAsc("id");
+            }
+            Page<Shop> resultPage = page(new Page<>(page, size), query);
+            return Result.ok(resultPage.getRecords(), resultPage.getTotal());
+        }
+
+        // 先用经纬度范围缩小 MySQL 候选集，再用球面距离精确筛选 5 公里范围。
+        final double radiusMeters = 5000.0;
+        double latDelta = radiusMeters / 111320.0;
+        double lonDelta = radiusMeters / (111320.0 * Math.max(0.01, Math.cos(Math.toRadians(y))));
+        query.between("x", x - lonDelta, x + lonDelta)
+                .between("y", y - latDelta, y + latDelta);
+        List<Shop> candidates = list(query);
+        List<Shop> nearby = new ArrayList<>();
+        for (Shop shop : candidates) {
+            if (shop.getX() == null || shop.getY() == null) {
+                continue;
+            }
+            double distance = distanceMeters(x, y, shop.getX(), shop.getY());
+            if (distance <= radiusMeters) {
+                shop.setDistance(distance);
+                nearby.add(shop);
+            }
+        }
+        nearby.sort((left, right) -> {
+            int byPrimary;
+            if ("distance".equals(sort)) {
+                byPrimary = Double.compare(left.getDistance(), right.getDistance());
+            } else if ("price".equals(sort)) {
+                byPrimary = Comparator.nullsLast(Long::compareTo).compare(left.getAvgPrice(), right.getAvgPrice());
+            } else {
+                byPrimary = Comparator.nullsLast(Comparator.<Integer>reverseOrder()).compare(left.getScore(), right.getScore());
+            }
+            return byPrimary != 0 ? byPrimary : Long.compare(left.getId(), right.getId());
+        });
+        long start = (long) (page - 1) * size;
+        if (start >= nearby.size()) {
+            return Result.ok(Collections.emptyList(), (long) nearby.size());
+        }
+        int from = (int) start;
+        int to = Math.min(from + size, nearby.size());
+        return Result.ok(nearby.subList(from, to), (long) nearby.size());
+    }
+
+    private static double distanceMeters(double x1, double y1, double x2, double y2) {
+        double lat1 = Math.toRadians(y1);
+        double lat2 = Math.toRadians(y2);
+        double deltaLat = lat2 - lat1;
+        double deltaLon = Math.toRadians(x2 - x1);
+        double a = Math.pow(Math.sin(deltaLat / 2), 2)
+                + Math.cos(lat1) * Math.cos(lat2) * Math.pow(Math.sin(deltaLon / 2), 2);
+        return 6371000.0 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     }
 }
