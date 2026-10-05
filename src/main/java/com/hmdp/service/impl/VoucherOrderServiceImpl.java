@@ -20,8 +20,10 @@ import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.annotation.PostConstruct;
+import javax.annotation.PreDestroy;
 import javax.annotation.Resource;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -29,6 +31,10 @@ import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.stream.Collectors;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -57,6 +63,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    @Resource
+    private TransactionTemplate transactionTemplate;
+
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
 
     static {
@@ -66,7 +75,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
 
-    private static final ExecutorService SECKILL_ORDER_EXECUTOR = Executors.newSingleThreadExecutor();
+    private final ExecutorService SECKILL_ORDER_EXECUTOR = Executors.newSingleThreadExecutor();
+    private volatile boolean running = true;
     private static final String ORDER_STREAM = "stream.orders";
     private static final String ORDER_GROUP = "g1";
 
@@ -91,12 +101,19 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
     }
 
+    @PreDestroy
+    private void stopConsumer() {
+        running = false;
+        SECKILL_ORDER_EXECUTOR.shutdownNow();
+    }
+
     private class VoucherOrderHandler implements Runnable {
 
         @Override
         public void run() {
-            while (true) {
+            while (running && !Thread.currentThread().isInterrupted()) {
                 try {
+                    handlePendingList();
                     // 1.获取消息队列中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS s1 >
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
                             Consumer.from(ORDER_GROUP, "c1"),
@@ -117,14 +134,18 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     // 4.确认消息 XACK
                     stringRedisTemplate.opsForStream().acknowledge(ORDER_STREAM, ORDER_GROUP, record.getId());
                 } catch (Exception e) {
+                    if (!running) break;
                     log.error("处理订单异常", e);
-                    handlePendingList();
+                    try { Thread.sleep(200); } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                 }
             }
         }
 
         private void handlePendingList() {
-            while (true) {
+            while (running && !Thread.currentThread().isInterrupted()) {
                 try {
                     // 1.获取pending-list中的订单信息 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS s1 0
                     List<MapRecord<String, Object, Object>> list = stringRedisTemplate.opsForStream().read(
@@ -146,8 +167,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     // 4.确认消息 XACK
                     stringRedisTemplate.opsForStream().acknowledge(ORDER_STREAM, ORDER_GROUP, record.getId());
                 } catch (Exception e) {
-                    log.error("处理订单异常", e);
-                    break;
+                    throw new IllegalStateException("待处理订单尚未落库，保留消息重试", e);
                 }
             }
         }
@@ -171,50 +191,32 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
     }*/
 
-    private void createVoucherOrder(VoucherOrder voucherOrder) {
+    protected void createVoucherOrder(VoucherOrder voucherOrder) {
         Long userId = voucherOrder.getUserId();
         Long voucherId = voucherOrder.getVoucherId();
-        // 创建锁对象
-        RLock redisLock = redissonClient.getLock("lock:order:" + userId);
-        // 尝试获取锁
-        boolean isLock = redisLock.tryLock();
-        // 判断
-        if (!isLock) {
-            // 获取锁失败，直接返回失败或者重试
-            log.error("不允许重复下单！");
-            return;
-        }
-
+        RLock lock = redissonClient.getLock("lock:order:" + userId);
+        if (!lock.tryLock()) throw new IllegalStateException("订单锁忙，保留消息重试");
         try {
-            // 5.1.查询订单
-            int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
-            // 5.2.判断是否存在
-            if (count > 0) {
-                // 用户已经购买过了
-                log.error("不允许重复下单！");
-                return;
-            }
-
-            // 6.扣减库存
-            boolean success = seckillVoucherService.update()
-                    .setSql("stock = stock - 1") // set stock = stock - 1
-                    .eq("voucher_id", voucherId).gt("stock", 0) // where id = ? and stock > 0
-                    .update();
-            if (!success) {
-                // 扣减失败
-                log.error("库存不足！");
-                return;
-            }
-
-            // 免费秒杀券直接标记为已领取；付费券仍须后续支付。
-            Voucher voucher = voucherService.getById(voucherId);
-            voucherOrder.setStatus(voucher != null && voucher.getPayValue() != null
-                    && voucher.getPayValue() == 0L ? 2 : 1);
-            // 7.创建订单
-            save(voucherOrder);
+            transactionTemplate.execute(status -> {
+                VoucherOrder existing = getById(voucherOrder.getId());
+                if (existing != null) {
+                    if (!userId.equals(existing.getUserId()) || !voucherId.equals(existing.getVoucherId()))
+                        throw new IllegalStateException("订单号冲突");
+                    return null;
+                }
+                if (query().eq("user_id", userId).eq("voucher_id", voucherId).count() > 0)
+                    throw new IllegalStateException("资格对应的订单号不一致，保留消息核对");
+                boolean deducted = seckillVoucherService.update().setSql("stock = stock - 1")
+                        .eq("voucher_id", voucherId).gt("stock", 0).update();
+                if (!deducted) throw new IllegalStateException("库存不足，保留消息核对");
+                Voucher voucher = voucherService.getById(voucherId);
+                voucherOrder.setStatus(voucher != null && voucher.getPayValue() != null
+                        && voucher.getPayValue() == 0L ? 2 : 1);
+                if (!save(voucherOrder)) throw new IllegalStateException("订单写入失败，回滚库存");
+                return null;
+            });
         } finally {
-            // 释放锁
-            redisLock.unlock();
+            lock.unlock();
         }
     }
 
@@ -295,7 +297,15 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if (order == null || !UserHolder.getUser().getId().equals(order.getUserId())) {
             return Result.fail("订单不存在");
         }
-        return Result.ok(order);
+        Map<String, Object> detail = BeanUtil.beanToMap(order);
+        Voucher voucher = voucherService.getById(order.getVoucherId());
+        if (voucher != null) {
+            detail.put("voucherType", voucher.getType());
+            detail.put("payValue", voucher.getPayValue());
+            detail.put("shopId", voucher.getShopId());
+            detail.put("voucherTitle", voucher.getTitle());
+        }
+        return Result.ok(detail);
     }
 
     @Override
@@ -303,6 +313,37 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         VoucherOrder order = query().eq("user_id", UserHolder.getUser().getId())
                 .eq("voucher_id", voucherId).orderByDesc("create_time").last("LIMIT 1").one();
         return Result.ok(order);
+    }
+
+    @Override
+    public Result queryMyOrders(Integer page, boolean heldOnly) {
+        if (page == null || page < 1 || page > 10000) return Result.fail("分页参数无效");
+        com.baomidou.mybatisplus.extension.conditions.query.LambdaQueryChainWrapper<VoucherOrder> query = lambdaQuery()
+                .eq(VoucherOrder::getUserId, UserHolder.getUser().getId());
+        if (heldOnly) query.eq(VoucherOrder::getStatus, 2);
+        Page<VoucherOrder> result = query.orderByDesc(VoucherOrder::getCreateTime)
+                .orderByDesc(VoucherOrder::getId).page(new Page<>(page, 20));
+        Map<Long, Voucher> vouchers = result.getRecords().isEmpty() ? Collections.emptyMap() :
+                voucherService.listByIds(result.getRecords().stream().map(VoucherOrder::getVoucherId)
+                        .collect(Collectors.toSet())).stream().collect(Collectors.toMap(Voucher::getId, v -> v));
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (VoucherOrder order : result.getRecords()) {
+            Voucher voucher = vouchers.get(order.getVoucherId());
+            Map<String, Object> item = new HashMap<>();
+            item.put("order_id", order.getId().toString());
+            item.put("voucher_id", order.getVoucherId());
+            item.put("status", order.getStatus());
+            item.put("created_at", order.getCreateTime());
+            if (voucher != null) {
+                item.put("shop_id", voucher.getShopId());
+                item.put("title", voucher.getTitle());
+                item.put("pay_cents", voucher.getPayValue());
+                item.put("voucher_type", voucher.getType());
+                item.put("rules", voucher.getRules());
+            }
+            items.add(item);
+        }
+        return Result.ok(items, result.getTotal());
     }
 
     @Override

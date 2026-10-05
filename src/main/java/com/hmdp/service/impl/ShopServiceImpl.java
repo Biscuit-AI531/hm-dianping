@@ -58,6 +58,16 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         // Shop shop = cacheClient
         //         .queryWithLogicalExpire(CACHE_SHOP_KEY, id, Shop.class, this::getById, 20L, TimeUnit.SECONDS);
 
+        // Course cache strategies share the same key. A logical-expiry wrapper cannot
+        // be deserialized as a Shop by pass-through; repair malformed/mismatched entries.
+        if (shop != null && !id.equals(shop.getId())) {
+            shop = getById(id);
+            if (shop != null) {
+                cacheClient.set(CACHE_SHOP_KEY + id, shop, CACHE_SHOP_TTL, TimeUnit.MINUTES);
+            } else {
+                stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
+            }
+        }
         if (shop == null) {
             return Result.fail("店铺不存在！");
         }

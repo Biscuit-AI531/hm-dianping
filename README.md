@@ -106,3 +106,20 @@ mvn -DskipTests package
 ```
 
 这能验证 Java 代码编译和打包。现有 `src/test` 中包含连接 MySQL、Redis 的 Spring 集成测试及写入 Redis 的演示测试；运行完整 `mvn test` 前应准备隔离的测试服务，不能将其视为无需外部依赖的单元测试。CityLens 对 Java 只读接口的联调命令见 [CityLens README](../../CityLens/README.md#验证)。
+
+## CityLens 个人业务与订单可靠性补充
+
+- `GET /voucher-order/mine?page=1`：当前登录用户最近订单，每页 20 条。
+- `GET /voucher-order/mine/vouchers?page=1`：当前用户状态为 2（已领取/已支付待核销）的券订单。持有状态不保证满足券使用门槛。
+- 个人接口仅从 `UserHolder` 读取身份，返回券类型、价格、店铺等字段，支持 Agent 生成取消草稿和关联店铺推荐。
+- 秒杀消费者持有用户锁直到事务提交；扣库存与订单写入同一事务，写入失败回滚。重复订单号核对用户与券后直接完成，不重复扣库存。仅提交成功后 ACK，锁忙或失败消息保留在 pending 重试。
+- 当前使用固定单消费者；毒消息可能阻塞 pending。多实例接管、死信队列、库存对账仍待实现。
+
+在仓库根目录运行本轮定向验证（使用 mock，不连接业务库写订单）：
+
+```bash
+docker compose -f CityLens/dev/docker-compose.yml exec -T java \
+  mvn -q -Dtest=VoucherOrderReliabilityTest,ShopSearchBoundaryTest,UserLogoutTest test
+```
+
+5 项测试覆盖事务回滚、消息幂等、私人查询过滤、搜索边界与注销；不能代替完整并发压测。
