@@ -47,6 +47,11 @@ public class VoucherOrderController {
         return voucherOrderService.orderOrdinaryVoucher(voucherId);
     }
 
+    @PostMapping("{id}/pay/mock")
+    public Result payMockOrder(@PathVariable("id") Long orderId, @RequestParam Long expectedPayCents) {
+        return voucherOrderService.payMockOrder(orderId, expectedPayCents);
+    }
+
     @GetMapping("{id}")
     public Result queryMyOrder(@PathVariable("id") Long orderId) {
         return voucherOrderService.queryMyOrder(orderId);

@@ -24,5 +24,7 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
 
     Result cancelUnpaidOrdinaryOrder(Long orderId);
 
+    Result payMockOrder(Long orderId, Long expectedPayCents);
+
     Result queryMyOrders(Integer page, boolean heldOnly);
 }

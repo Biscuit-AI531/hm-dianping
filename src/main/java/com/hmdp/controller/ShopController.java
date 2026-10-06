@@ -45,6 +45,26 @@ public class ShopController {
         return shopService.searchShops(criteria);
     }
 
+    /** 统一前端的跨分类店铺列表；Agent 的严格搜索接口保持原有条件。 */
+    @GetMapping("/catalog")
+    public Result catalog(@RequestParam(value = "keyword", defaultValue = "") String keyword,
+                          @RequestParam(value = "typeId", required = false) Long typeId,
+                          @RequestParam(value = "page", defaultValue = "1") Integer page,
+                          @RequestParam(value = "size", defaultValue = "12") Integer size,
+                          @RequestParam(value = "sort", defaultValue = "score") String sort) {
+        if (page < 1 || page > 10000 || size < 1 || size > 20 || keyword.length() > 50
+                || (typeId != null && typeId <= 0) || !("score".equals(sort) || "price".equals(sort))) {
+            return Result.fail("店铺查询参数无效");
+        }
+        QueryWrapper<Shop> query = new QueryWrapper<>();
+        query.eq(typeId != null, "type_id", typeId).like(StrUtil.isNotBlank(keyword), "name", keyword.trim());
+        if ("price".equals(sort)) query.orderByAsc("avg_price");
+        else query.orderByDesc("score");
+        query.orderByAsc("id");
+        Page<Shop> result = shopService.page(new Page<>(page, size), query);
+        return Result.ok(result.getRecords(), result.getTotal());
+    }
+
     /** CityLens 在组合两站前批量复核候选，直接读取当前店铺数据。 */
     @GetMapping("/batch")
     public Result queryShopsByIds(@RequestParam("ids") List<Long> ids) {

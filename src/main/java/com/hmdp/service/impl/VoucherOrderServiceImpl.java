@@ -50,6 +50,9 @@ import java.util.concurrent.Executors;
 @Service
 public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {
 
+    @org.springframework.beans.factory.annotation.Value("${citylens.payment.mock-enabled:false}")
+    private boolean mockPaymentEnabled;
+
     @Resource
     private ISeckillVoucherService seckillVoucherService;
 
@@ -344,6 +347,27 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             items.add(item);
         }
         return Result.ok(items, result.getTotal());
+    }
+
+    @Override
+    public Result payMockOrder(Long orderId, Long expectedPayCents) {
+        if (!mockPaymentEnabled) return Result.fail("本地模拟支付未启用");
+        Long userId = UserHolder.getUser().getId();
+        VoucherOrder order = getById(orderId);
+        if (order == null || !userId.equals(order.getUserId())) return Result.fail("订单不存在");
+        Voucher voucher = voucherService.getById(order.getVoucherId());
+        if (voucher == null || voucher.getPayValue() == null || voucher.getPayValue() <= 0
+                || !voucher.getPayValue().equals(expectedPayCents)) return Result.fail("支付金额不匹配，请重新查询");
+        if (Integer.valueOf(2).equals(order.getStatus())) return Result.ok(orderId.toString());
+        if (!Integer.valueOf(1).equals(order.getStatus())) return Result.fail("订单不是待支付状态");
+        boolean changed = update().set("status", 2).set("pay_time", LocalDateTime.now())
+                .eq("id", orderId).eq("user_id", userId).eq("status", 1).update();
+        if (!changed) {
+            VoucherOrder latest = getById(orderId);
+            if (latest == null || !userId.equals(latest.getUserId()) || !Integer.valueOf(2).equals(latest.getStatus()))
+                return Result.fail("订单状态已变化，请刷新后重试");
+        }
+        return Result.ok(orderId.toString());
     }
 
     @Override

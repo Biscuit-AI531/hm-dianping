@@ -119,7 +119,9 @@ mvn -DskipTests package
 
 ```bash
 docker compose -f CityLens/dev/docker-compose.yml exec -T java \
-  mvn -q -Dtest=VoucherOrderReliabilityTest,ShopSearchBoundaryTest,UserLogoutTest test
+  mvn -q -Dtest=ShopCacheCompatibilityTest,VoucherOrderReliabilityTest,ShopSearchBoundaryTest,UserLogoutTest test
 ```
 
-5 项测试覆盖事务回滚、消息幂等、私人查询过滤、搜索边界与注销；不能代替完整并发压测。
+7 项测试覆盖事务回滚、消息幂等、私人查询过滤、搜索边界与注销；不能代替完整并发压测。
+
+店铺详情会校验缓存中的店铺 ID；课程逻辑过期包装与穿透缓存格式混用导致空详情时，读取数据库并修复缓存，避免券预览误报店铺不存在。
